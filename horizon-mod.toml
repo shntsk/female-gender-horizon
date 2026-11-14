@@ -3,9 +3,16 @@ name = "Female Gender Mod (Horizon port)"
 version = "0.1.0"
 description = "Port of Wildfire's Female Gender Mod: a breast layer drawn over every player."
 authors = ["WildfireRomeo (original mod)", "Horizon port"]
+license = "LGPL-3.0-or-later"
+credits = "Female Gender Mod by WildfireRomeo and contributors"
+homepage = "https://github.com/shntsk/female-gender-horizon"
+issues = "https://github.com/shntsk/female-gender-horizon/issues"
 api = "0.2"
 side = "client"
-capabilities = []
+# The manifest validator of the pinned Horizon commit accepts exactly this value for every mod,
+# native ones included (`Manifest::parse`: `capabilities != [Registries]` is refused). An empty list
+# fails `cargo horizon-mod build` with "a content mod has capabilities = [\"registries\"]".
+capabilities = ["registries"]
 
 [native]
 game = "26.3"
