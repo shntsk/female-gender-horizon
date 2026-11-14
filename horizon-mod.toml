@@ -1,0 +1,13 @@
+id = "female_gender"
+name = "Female Gender Mod (Horizon port)"
+version = "0.1.0"
+description = "Port of Wildfire's Female Gender Mod: a breast layer drawn over every player."
+authors = ["WildfireRomeo (original mod)", "Horizon port"]
+api = "0.2"
+side = "client"
+capabilities = []
+
+[native]
+game = "26.3"
+horizon = "4891a0dbe5f926bc2001b18c79c2ad55d8732919"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

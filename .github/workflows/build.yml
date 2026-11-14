@@ -1,0 +1,76 @@
+name: build
+
+# Builds the mod against the Horizon fork pinned in horizon-mod.toml ([native].horizon).
+#  - check:   `cargo check` of the mod crate against that fork's horizon-mod-api. Always runs.
+#  - package: `cargo horizon-mod build` -> female_gender.hmod. Needs the SDK release of the pinned
+#             commit (a signed `sdk-<sha>` release); when there is none this job fails softly and the
+#             source package is still uploaded.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  HORIZON_REPO: shntsk/horizon
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the pinned Horizon commit
+        id: pin
+        run: |
+          sha=$(sed -n 's/^horizon *= *"\([0-9a-f]\{40\}\)".*/\1/p' horizon-mod.toml)
+          test -n "$sha" || { echo "no [native].horizon pin"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Fetch the fork's mod API where the crate's path dependency expects it
+        run: |
+          mkdir -p .horizon/sdk
+          git clone https://github.com/${HORIZON_REPO}.git .horizon/sdk/api
+          git -C .horizon/sdk/api checkout ${{ steps.pin.outputs.sha }}
+      - name: Rust toolchain of the pinned commit
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' .horizon/sdk/api/rust-toolchain.toml | head -1)
+          rustup toolchain install "${channel:-stable}" --profile minimal
+          rustup default "${channel:-stable}"
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --all-targets
+
+  package:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Source package (always)
+        run: |
+          mkdir -p dist
+          git archive --format=zip --prefix=female_gender/ -o dist/female_gender-src.zip HEAD
+      - name: Install cargo-horizon-mod from the fork
+        id: tool
+        continue-on-error: true
+        run: |
+          sha=$(sed -n 's/^horizon *= *"\([0-9a-f]\{40\}\)".*/\1/p' horizon-mod.toml)
+          cargo install --locked --git https://github.com/${HORIZON_REPO} --rev "$sha" cargo-horizon-mod
+      - name: Build the .hmod
+        if: steps.tool.outcome == 'success'
+        continue-on-error: true
+        run: |
+          cargo horizon-mod build
+          cp target/horizon-mod/*.hmod dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: female_gender
+          path: dist/*
+          if-no-files-found: error
+      - name: Attach to the release (tags)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
