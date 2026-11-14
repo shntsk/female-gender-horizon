@@ -3,8 +3,9 @@ name: build
 # Builds the mod against the Horizon fork pinned in horizon-mod.toml ([native].horizon).
 #  - check:   `cargo check` of the mod crate against that fork's horizon-mod-api. Always runs.
 #  - package: `cargo horizon-mod build` -> female_gender.hmod. Needs the SDK release of the pinned
-#             commit (a signed `sdk-<sha>` release); when there is none this job fails softly and the
-#             source package is still uploaded.
+#             commit (a signed `sdk-<sha>` release). Without it the job still uploads the source
+#             package and warns; on a `v*` tag a missing .hmod fails the job, so no release goes out
+#             without it.
 on:
   push:
     branches: [main]
@@ -16,27 +17,39 @@ env:
   HORIZON_REPO: shntsk/horizon
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pin.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Read the pinned Horizon commit
         id: pin
         run: |
           sha=$(sed -n 's/^horizon *= *"\([0-9a-f]\{40\}\)".*/\1/p' horizon-mod.toml)
-          test -n "$sha" || { echo "no [native].horizon pin"; exit 1; }
+          test -n "$sha" || { echo "::error::no [native].horizon pin in horizon-mod.toml"; exit 1; }
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Fetch the fork's mod API where the crate's path dependency expects it
+        env:
+          SHA: ${{ steps.pin.outputs.sha }}
         run: |
-          mkdir -p .horizon/sdk
-          git clone https://github.com/${HORIZON_REPO}.git .horizon/sdk/api
-          git -C .horizon/sdk/api checkout ${{ steps.pin.outputs.sha }}
+          git init -q .horizon/sdk/api
+          git -C .horizon/sdk/api fetch -q --depth 1 "https://github.com/${HORIZON_REPO}.git" "$SHA"
+          git -C .horizon/sdk/api checkout -q FETCH_HEAD
       - name: Rust toolchain of the pinned commit
         run: |
-          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' .horizon/sdk/api/rust-toolchain.toml | head -1)
+          channel=
+          toolchain=.horizon/sdk/api/rust-toolchain.toml
+          if [ -f "$toolchain" ]; then
+            channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$toolchain" | head -1)
+          fi
           rustup toolchain install "${channel:-stable}" --profile minimal
           rustup default "${channel:-stable}"
       - uses: Swatinem/rust-cache@v2
@@ -46,20 +59,30 @@ jobs:
   package:
     needs: check
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # only the release step below writes
+    env:
+      SHA: ${{ needs.check.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
       - name: Source package (always)
         run: |
           mkdir -p dist
           git archive --format=zip --prefix=female_gender/ -o dist/female_gender-src.zip HEAD
+      - name: Cache cargo-horizon-mod (compiling it takes about 5 minutes)
+        id: cached
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-horizon-mod
+          key: cargo-horizon-mod-${{ runner.os }}-${{ env.SHA }}
       - name: Install cargo-horizon-mod from the fork
         id: tool
+        if: steps.cached.outputs.cache-hit != 'true'
         continue-on-error: true
-        run: |
-          sha=$(sed -n 's/^horizon *= *"\([0-9a-f]\{40\}\)".*/\1/p' horizon-mod.toml)
-          cargo install --locked --git https://github.com/${HORIZON_REPO} --rev "$sha" cargo-horizon-mod
+        run: cargo install --locked --git "https://github.com/${HORIZON_REPO}" --rev "$SHA" cargo-horizon-mod
       - name: Build the .hmod
-        if: steps.tool.outcome == 'success'
+        id: build
+        if: steps.cached.outputs.cache-hit == 'true' || steps.tool.outcome == 'success'
         continue-on-error: true
         run: |
           cargo horizon-mod build
@@ -69,8 +92,21 @@ jobs:
           name: female_gender
           path: dist/*
           if-no-files-found: error
+      - name: Require the .hmod
+        run: |
+          if compgen -G "dist/*.hmod" > /dev/null; then
+            echo "Built $(ls dist/*.hmod)" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          msg="No .hmod was built (cargo-horizon-mod: ${{ steps.tool.outcome }}, build: ${{ steps.build.outcome }}). Only the source package was uploaded; see the failed step's log."
+          echo "$msg" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "::error title=No .hmod::$msg"
+            exit 1
+          fi
+          echo "::warning title=No .hmod::$msg"
       - name: Attach to the release (tags)
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --repo "$GITHUB_REPOSITORY" --generate-notes --verify-tag
